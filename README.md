@@ -37,7 +37,7 @@ go version
 #### 克隆项目
 
 ```bash
-git clone https://github.com/your-username/network-monitor.git
+git clone https://github.com/nixevol/network-monitor.git
 cd network-monitor
 ```
 
