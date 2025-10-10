@@ -7,7 +7,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-
+	"golang.org/x/sys/windows/registry"
 	"log"
 	"net"
 	"os"
@@ -108,7 +108,93 @@ var (
 	config            *Config
 	monitoringEnabled bool         = true // 双网检测开关状态
 	monitorTicker     *time.Ticker        // 定时器
+	startupEnabled    bool                // 开机启动状态
 )
+
+// isStartupEnabled 检查是否已设置开机启动
+func isStartupEnabled() bool {
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+	defer key.Close()
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+
+	// 获取程序名称（不含路径）
+	appName := filepath.Base(exePath)
+	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
+
+	value, _, err := key.GetStringValue(appName)
+	if err != nil {
+		return false
+	}
+
+	// 检查值是否匹配当前可执行文件路径
+	return value == exePath
+}
+
+// setStartup 设置开机启动
+func setStartup(enable bool) error {
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.ALL_ACCESS)
+	if err != nil {
+		return fmt.Errorf("无法打开注册表项: %v", err)
+	}
+	defer key.Close()
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("无法获取可执行文件路径: %v", err)
+	}
+
+	// 获取程序名称（不含路径）
+	appName := filepath.Base(exePath)
+	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
+
+	if enable {
+		// 设置开机启动
+		err = key.SetStringValue(appName, exePath)
+		if err != nil {
+			return fmt.Errorf("设置开机启动失败: %v", err)
+		}
+		log.Printf("已设置开机启动: %s", appName)
+	} else {
+		// 取消开机启动
+		err = key.DeleteValue(appName)
+		if err != nil && err != registry.ErrNotExist {
+			return fmt.Errorf("取消开机启动失败: %v", err)
+		}
+		log.Printf("已取消开机启动: %s", appName)
+	}
+
+	return nil
+}
+
+// toggleStartup 切换开机启动状态
+func toggleStartup(menuItem *systray.MenuItem) {
+	newState := !startupEnabled
+	if err := setStartup(newState); err != nil {
+		log.Printf("设置开机启动失败: %v", err)
+		return
+	}
+
+	startupEnabled = newState
+	updateStartupMenuItem(menuItem)
+}
+
+// updateStartupMenuItem 更新开机启动菜单项标题和提示
+func updateStartupMenuItem(menuItem *systray.MenuItem) {
+	if startupEnabled {
+		menuItem.SetTitle("取消开机启动")
+		menuItem.SetTooltip("取消开机启动")
+	} else {
+		menuItem.SetTitle("设置开机启动")
+		menuItem.SetTooltip("设置开机启动")
+	}
+}
 
 // loadConfig 从config.ini文件加载配置
 func loadConfig() error {
@@ -428,6 +514,9 @@ func (nm *NetworkMonitor) Stop() {
 var monitor *NetworkMonitor
 
 func onReady() {
+	// 检查当前开机启动状态
+	startupEnabled = isStartupEnabled()
+
 	// 设置系统托盘图标、标题和提示
 	systray.SetIcon(getIcon())
 	// 设置托盘标题和提示信息
@@ -446,7 +535,11 @@ func onReady() {
 	// 创建菜单项
 	mNetworkSwitch := systray.AddMenuItem("网络切换", "切换网络接口")
 	mToggleMonitor := systray.AddMenuItem("暂停双网检测", "启动/暂停双网检测")
+	mStartupToggle := systray.AddMenuItem("设置开机启动", "设置/取消开机启动")
 	mQuit := systray.AddMenuItem("退出", "退出程序")
+
+	// 更新开机启动菜单项状态
+	updateStartupMenuItem(mStartupToggle)
 
 	// 启动网络监控
 	monitor = NewNetworkMonitor()
@@ -460,6 +553,8 @@ func onReady() {
 				go monitor.NetworkSwitch()
 			case <-mToggleMonitor.ClickedCh:
 				go toggleMonitoring(mToggleMonitor)
+			case <-mStartupToggle.ClickedCh:
+				go toggleStartup(mStartupToggle)
 			case <-mQuit.ClickedCh:
 				if monitorTicker != nil {
 					monitorTicker.Stop()
