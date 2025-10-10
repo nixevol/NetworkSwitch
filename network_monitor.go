@@ -196,6 +196,19 @@ func updateStartupMenuItem(menuItem *systray.MenuItem) {
 	}
 }
 
+// updateNetworkSwitchMenuItem 更新网络切换菜单项标题
+func updateNetworkSwitchMenuItem(menuItem *systray.MenuItem) {
+	nextTarget := getNextNetworkTarget()
+	if nextTarget == "" {
+		menuItem.SetTitle("网络切换")
+		menuItem.SetTooltip("切换网络接口")
+		return
+	}
+	
+	menuItem.SetTitle(fmt.Sprintf("切换网络至[%s]", nextTarget))
+	menuItem.SetTooltip(fmt.Sprintf("切换到 %s 网络接口", nextTarget))
+}
+
 // loadConfig 从config.ini文件加载配置
 func loadConfig() error {
 	exePath, err := os.Executable()
@@ -378,6 +391,55 @@ func isInterfaceEnabled(interfaceName string) bool {
 	return false
 }
 
+// getCurrentActiveNetwork 获取当前活动的网络接口名称
+func getCurrentActiveNetwork() string {
+	if config == nil {
+		return ""
+	}
+	
+	// 检查内网是否启用
+	if isInterfaceEnabled(config.InternalConn) {
+		return config.InternalConn
+	}
+	
+	// 检查外网是否启用
+	if isInterfaceEnabled(config.ExternalConn) {
+		return config.ExternalConn
+	}
+	
+	return ""
+}
+
+// getNextNetworkTarget 获取下一个要切换的网络接口名称
+func getNextNetworkTarget() string {
+	current := getCurrentActiveNetwork()
+	
+	if current == "" {
+		// 如果没有活动的网络，默认返回外网
+		if config != nil {
+			return config.ExternalConn
+		}
+		return ""
+	}
+	
+	if config == nil {
+		return ""
+	}
+	
+	// 如果当前是内网，返回外网
+	if current == config.InternalConn {
+		return config.ExternalConn
+	}
+	
+	// 如果当前是外网，返回内网
+	if current == config.ExternalConn {
+		return config.InternalConn
+	}
+	
+	// 默认返回外网
+	return config.ExternalConn
+}
+
 // NetworkMonitor 管理网络接口
 type NetworkMonitor struct {
 	ctx    context.Context
@@ -540,17 +602,38 @@ func onReady() {
 
 	// 更新开机启动菜单项状态
 	updateStartupMenuItem(mStartupToggle)
+	
+	// 初始更新网络切换菜单项标题
+	updateNetworkSwitchMenuItem(mNetworkSwitch)
 
 	// 启动网络监控
 	monitor = NewNetworkMonitor()
 	go monitor.StartMonitoring()
+
+	// 启动定时更新网络切换菜单项标题
+	go func() {
+		ticker := time.NewTicker(5 * time.Second) // 每5秒更新一次
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				updateNetworkSwitchMenuItem(mNetworkSwitch)
+			}
+		}
+	}()
 
 	// 处理菜单点击事件
 	go func() {
 		for {
 			select {
 			case <-mNetworkSwitch.ClickedCh:
-				go monitor.NetworkSwitch()
+				go func() {
+					monitor.NetworkSwitch()
+					// 切换后更新菜单项标题
+					time.Sleep(2 * time.Second)
+					updateNetworkSwitchMenuItem(mNetworkSwitch)
+				}()
 			case <-mToggleMonitor.ClickedCh:
 				go toggleMonitoring(mToggleMonitor)
 			case <-mStartupToggle.ClickedCh:
