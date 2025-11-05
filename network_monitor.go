@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"golang.org/x/sys/windows/registry"
 	"log"
 	"net"
 	"os"
@@ -17,6 +16,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/windows/registry"
 
 	"github.com/getlantern/systray"
 )
@@ -204,7 +205,7 @@ func updateNetworkSwitchMenuItem(menuItem *systray.MenuItem) {
 		menuItem.SetTooltip("切换网络接口")
 		return
 	}
-	
+
 	menuItem.SetTitle(fmt.Sprintf("切换网络至[%s]", nextTarget))
 	menuItem.SetTooltip(fmt.Sprintf("切换到 %s 网络接口", nextTarget))
 }
@@ -348,11 +349,11 @@ func CheckConnectivity() (bool, bool) {
 		log.Printf("Config not loaded, using default values")
 		return false, false
 	}
-	
+
 	// 首先检查网络接口是否启用
 	internalInterfaceEnabled := isInterfaceEnabled(config.InternalConn)
 	externalInterfaceEnabled := isInterfaceEnabled(config.ExternalConn)
-	
+
 	// 只有接口启用时才测试连通性
 	var internalOK, externalOK bool
 	if internalInterfaceEnabled {
@@ -361,7 +362,7 @@ func CheckConnectivity() (bool, bool) {
 	if externalInterfaceEnabled {
 		externalOK = testConnection(config.ExternalIP+":80", 3*time.Second)
 	}
-	
+
 	return internalOK, externalOK
 }
 
@@ -382,7 +383,7 @@ func isInterfaceEnabled(interfaceName string) bool {
 		log.Printf("Failed to get network interfaces: %v", err)
 		return false
 	}
-	
+
 	for _, iface := range interfaces {
 		if iface.Name == interfaceName {
 			return iface.IsEnabled && iface.OperStatus == IF_OPER_STATUS_UP
@@ -396,24 +397,65 @@ func getCurrentActiveNetwork() string {
 	if config == nil {
 		return ""
 	}
-	
+
 	// 检查内网是否启用
 	if isInterfaceEnabled(config.InternalConn) {
 		return config.InternalConn
 	}
-	
+
 	// 检查外网是否启用
 	if isInterfaceEnabled(config.ExternalConn) {
 		return config.ExternalConn
 	}
-	
+
 	return ""
+}
+
+// getInterfaceIP 获取指定网络接口的IP地址
+func getInterfaceIP(interfaceName string) string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	for _, iface := range interfaces {
+		if iface.Name == interfaceName {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				return ""
+			}
+			for _, addr := range addrs {
+				if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+					if ipNet.IP.To4() != nil {
+						return ipNet.IP.String()
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// updateTooltip 更新托盘提示信息
+func updateTooltip() {
+	currentNetwork := getCurrentActiveNetwork()
+	if currentNetwork == "" {
+		systray.SetTooltip("切换网络\n当前: 无连接")
+		return
+	}
+
+	ip := getInterfaceIP(currentNetwork)
+	if ip == "" {
+		systray.SetTooltip(fmt.Sprintf("切换网络\n当前: %s\nIP: 获取中...", currentNetwork))
+	} else {
+		systray.SetTooltip(fmt.Sprintf("切换网络\n当前: %s\nIP: %s", currentNetwork, ip))
+	}
 }
 
 // getNextNetworkTarget 获取下一个要切换的网络接口名称
 func getNextNetworkTarget() string {
 	current := getCurrentActiveNetwork()
-	
+
 	if current == "" {
 		// 如果没有活动的网络，默认返回外网
 		if config != nil {
@@ -421,21 +463,21 @@ func getNextNetworkTarget() string {
 		}
 		return ""
 	}
-	
+
 	if config == nil {
 		return ""
 	}
-	
+
 	// 如果当前是内网，返回外网
 	if current == config.InternalConn {
 		return config.ExternalConn
 	}
-	
+
 	// 如果当前是外网，返回内网
 	if current == config.ExternalConn {
 		return config.InternalConn
 	}
-	
+
 	// 默认返回外网
 	return config.ExternalConn
 }
@@ -602,7 +644,7 @@ func onReady() {
 
 	// 更新开机启动菜单项状态
 	updateStartupMenuItem(mStartupToggle)
-	
+
 	// 初始更新网络切换菜单项标题
 	updateNetworkSwitchMenuItem(mNetworkSwitch)
 
@@ -610,15 +652,19 @@ func onReady() {
 	monitor = NewNetworkMonitor()
 	go monitor.StartMonitoring()
 
-	// 启动定时更新网络切换菜单项标题
+	// 启动定时更新网络切换菜单项标题和托盘提示
 	go func() {
 		ticker := time.NewTicker(5 * time.Second) // 每5秒更新一次
 		defer ticker.Stop()
-		
+
+		// 初始更新
+		updateTooltip()
+
 		for {
 			select {
 			case <-ticker.C:
 				updateNetworkSwitchMenuItem(mNetworkSwitch)
+				updateTooltip()
 			}
 		}
 	}()
@@ -630,9 +676,10 @@ func onReady() {
 			case <-mNetworkSwitch.ClickedCh:
 				go func() {
 					monitor.NetworkSwitch()
-					// 切换后更新菜单项标题
+					// 切换后更新菜单项标题和托盘提示
 					time.Sleep(2 * time.Second)
 					updateNetworkSwitchMenuItem(mNetworkSwitch)
+					updateTooltip()
 				}()
 			case <-mToggleMonitor.ClickedCh:
 				go toggleMonitoring(mToggleMonitor)
